@@ -1,5 +1,8 @@
 # 🚗 A.C.E. Remote — Live Telematics & Anti-Theft
 
+**▶ Live demo: https://ace-remote.onrender.com** — open it, hit a demo button (🚨 Theft / 📍 Driven off),
+and watch the alert fire in real time. *(Free tier — first load may take ~30 s to wake.)*
+
 Turn any car into a connected car. A.C.E. Remote streams a vehicle's **live status** to a web dashboard
 and **pages your phone the moment something's wrong** — the engine starting while it's armed, the car being
 driven off, overheating, or the monitor going dark. It's the remote/cloud sibling of **A.C.E.** (the
