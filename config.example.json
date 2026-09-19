@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy to config.json and fill in. enabled:false = dry-run (prints what it WOULD send). Set enabled:true to actually page your phone.",
+  "enabled": false,
+  "channels": ["push", "sms"],
+  "cooldown_secs": 30,
+
+  "ntfy_topic": "ace-remote-CHANGE-ME-to-something-random",
+  "phone": "5555551234",
+  "carrier": "tmobile",
+  "email": "you@example.com",
+
+  "mqtt": {
+    "enabled": false,
+    "host": "test.mosquitto.org",
+    "port": 1883,
+    "topic": "ace-remote/+/telemetry",
+    "tls": false,
+    "username": "",
+    "password": ""
+  }
+}

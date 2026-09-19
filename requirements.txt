@@ -1,0 +1,4 @@
+fastapi>=0.110
+uvicorn>=0.27
+paho-mqtt>=2.0
+# optional (real dongle): obd
