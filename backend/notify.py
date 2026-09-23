@@ -67,8 +67,11 @@ def _send_email(to_addr: str, subject: str, body: str) -> str:
 
 def _send_ntfy(topic: str, title: str, body: str, priority: str = "urgent") -> str:
     url = f"https://ntfy.sh/{topic}"
+    # ntfy's Title header is sent as a latin-1 HTTP header — strip emoji / non-encodable chars so urllib
+    # doesn't raise (the emoji still shows in the UTF-8 body + the Tags render their own icon).
+    safe_title = title.encode("ascii", "ignore").decode("ascii").strip() or "A.C.E. Remote"
     req = urllib.request.Request(url, data=body.encode("utf-8"), method="POST",
-                                 headers={"Title": title, "Priority": priority, "Tags": "rotating_light,car"})
+                                 headers={"Title": safe_title, "Priority": priority, "Tags": "rotating_light,car"})
     urllib.request.urlopen(req, timeout=8)
     return "sent"
 
