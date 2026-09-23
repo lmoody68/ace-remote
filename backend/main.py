@@ -17,6 +17,7 @@ import random
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from .monitor import Monitor
 from . import notify
@@ -25,6 +26,10 @@ _HERE = os.path.dirname(__file__)
 _INDEX = os.path.join(_HERE, "..", "frontend", "index.html")
 
 app = FastAPI(title="A.C.E. Remote")
+# Allow A.C.E. Mobile (ace-auto.us) to POST live OBD reads to /api/ingest from the browser ("Guard mode").
+app.add_middleware(CORSMiddleware,
+                   allow_origins=["https://ace-auto.us", "https://www.ace-auto.us"],
+                   allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 mon = Monitor()
 _clients: set[WebSocket] = set()
 _loop: asyncio.AbstractEventLoop | None = None
