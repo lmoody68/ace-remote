@@ -2,6 +2,8 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>A.C.E. Remote</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   :root{--bg:#0b0f16;--panel:#141a24;--panel2:#0f151d;--line:#232c3a;--ink:#e9eef6;--dim:#93a1b5;
     --mute:#5f6d82;--accent:#3ba0ff;--ok:#33d17a;--warn:#f5a623;--crit:#ff4d4d;--good:#33d17a}
@@ -33,8 +35,15 @@
   .tile .l{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-top:3px}
   h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:0 0 10px}
   /* location */
-  #map{width:100%;height:190px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;display:block}
+  #map{width:100%;height:300px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;display:block;z-index:0}
+  .leaflet-container{background:var(--panel2)!important;font:inherit}
   .loc{font-size:12px;color:var(--dim);margin-top:8px;font-variant-numeric:tabular-nums}
+  /* law-enforcement recovery panel */
+  .le-btn{background:#241016;color:#ff9a9a;border:1px solid var(--crit);border-radius:9px;padding:10px 14px;cursor:pointer;font-size:12.5px;font-weight:800}
+  .le-open{background:#12233a;color:var(--accent);border:1px solid var(--line);border-radius:9px;padding:9px 13px;cursor:pointer;font-size:12.5px;font-weight:700;text-decoration:none;display:inline-block}
+  .le-copy{background:#26303f;color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:9px 13px;cursor:pointer;font-size:12.5px;font-weight:700}
+  .le-report{background:#0c0f14;border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:12px;font-size:13px;line-height:1.65;white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;color:#cfe0f2}
+  .le-kv b{color:var(--dim);font-weight:600}
   /* alerts */
   .testbtn{background:#26303f;color:var(--accent);border:1px solid var(--line);border-radius:9px;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:600}
   /* remote engine control */
@@ -88,8 +97,8 @@
         <div class="tile"><div class="n" id="speed">0</div><div class="l">MPH</div></div>
         <div class="tile"><div class="n" id="run">0:00</div><div class="l">Running</div></div>
       </div>
-      <h2 style="margin-top:18px">Location & geofence</h2>
-      <canvas id="map" width="620" height="190"></canvas>
+      <h2 style="margin-top:18px">Location, geofence & recovery trail</h2>
+      <div id="map"></div>
       <div class="loc" id="loc">no GPS yet</div>
     </div>
 
@@ -117,6 +126,19 @@
       </div>
     </div>
   </div>
+
+  <div class="card" id="leCard" style="margin-top:14px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px">
+      <h2 style="margin:0">🚓 Stolen-vehicle info for law enforcement</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="le-btn" onclick="genLeReport()">📍 Generate recovery report</button>
+        <a class="le-open" id="leMaps" href="#" target="_blank" rel="noopener" style="display:none">🗺️ Open in Google Maps</a>
+        <button class="le-copy" id="leCopy" onclick="copyLeReport()" style="display:none">📋 Copy for police</button>
+      </div>
+    </div>
+    <div class="muted" style="font-size:12px">Current location, street address, direction of travel and full vehicle description — formatted to hand to police for a stolen-vehicle report. <b style="color:var(--warn)">Live recovery tracking of a stolen car requires the in-car GPS device (ESP32); the phone Guard-mode feed only tracks while your phone is in the car.</b></div>
+    <div class="le-report" id="leReport" style="display:none"></div>
+  </div>
 </div>
 
 <script>
@@ -143,7 +165,9 @@ function render(d){
   $('armBtn').className='armbtn '+(armed?'armed':'disarmed');
   $('armState').textContent=armed?'theft protection ON — tap to disarm':'safe to drive — tap to arm';
   // location
-  if(s.lat!=null){ if(!home) home=[s.lat,s.lon]; $('loc').textContent=`lat ${s.lat.toFixed(5)}, lon ${s.lon.toFixed(5)} · geofence ${s.geofence_m}m`; drawMap(s); }
+  if(s.lat!=null){ if(!home) home=[s.lat,s.lon];
+    const hd=s.heading!=null?` · heading ${Math.round(s.heading)}°`:'';
+    $('loc').textContent=`lat ${s.lat.toFixed(5)}, lon ${s.lon.toFixed(5)} · geofence ${s.geofence_m}m${hd}`; drawMap(s, d.track); }
   // alerts
   const al=d.alerts||[];
   $('alerts').innerHTML = al.length? al.map(a=>`<div class="alert ${a.level}">${a.msg}<div class="t">${fmtT(a.ts)}</div></div>`).join('')
@@ -162,23 +186,72 @@ function render(d){
   }
 }
 
-function drawMap(s){
-  const c=$('map'), x=c.getContext('2d'), W=c.width,H=c.height; x.clearRect(0,0,W,H);
-  const cx=W/2, cy=H/2;
-  // geofence ring around home (center)
-  x.strokeStyle='rgba(59,160,255,.5)'; x.setLineDash([5,4]); x.beginPath(); x.arc(cx,cy,60,0,7); x.stroke(); x.setLineDash([]);
-  x.fillStyle='rgba(59,160,255,.08)'; x.beginPath(); x.arc(cx,cy,60,0,7); x.fill();
-  // home dot
-  x.fillStyle='#3ba0ff'; x.beginPath(); x.arc(cx,cy,4,0,7); x.fill();
-  x.fillStyle='#93a1b5'; x.font='11px system-ui'; x.fillText('home',cx+8,cy+4);
-  // car position (scaled: ~0.001 deg ≈ 60px)
-  if(home){
-    const dx=(s.lon-home[1])*60000, dy=-(s.lat-home[0])*60000;
-    const px=Math.max(8,Math.min(W-8,cx+dx)), py=Math.max(8,Math.min(H-8,cy+dy));
-    const far=Math.hypot(dx,dy)>60;
-    x.fillStyle=far?'#ff4d4d':'#33d17a'; x.beginPath(); x.arc(px,py,6,0,7); x.fill();
-    x.fillStyle='#e9eef6'; x.font='13px system-ui'; x.fillText('🚗',px-8,py-9);
+let lmap=null,carMarker=null,trailLine=null,geoCircle=null,homeMarker=null,mapCentered=false;
+function _hav(aLat,aLon,bLat,bLon){const R=6371000,r=Math.PI/180;const dLat=(bLat-aLat)*r,dLon=(bLon-aLon)*r;
+  const h=Math.sin(dLat/2)**2+Math.cos(aLat*r)*Math.cos(bLat*r)*Math.sin(dLon/2)**2;return 2*R*Math.asin(Math.sqrt(h));}
+function initMap(){
+  if(lmap||typeof L==='undefined')return;
+  lmap=L.map('map',{zoomControl:true,attributionControl:false}).setView([38.7881,-90.4974],12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(lmap);
+}
+function drawMap(s,track){
+  if(!lmap){initMap(); if(!lmap)return;}
+  if(s.lat==null)return;
+  const pos=[s.lat,s.lon];
+  if(track&&track.length){
+    const pts=track.filter(p=>p.lat!=null).map(p=>[p.lat,p.lon]);
+    if(pts.length){ if(trailLine)trailLine.setLatLngs(pts); else trailLine=L.polyline(pts,{color:'#3ba0ff',weight:3,opacity:.85}).addTo(lmap); }
   }
+  if(home){
+    if(geoCircle){geoCircle.setLatLng(home);geoCircle.setRadius(s.geofence_m||60);}
+    else geoCircle=L.circle(home,{radius:s.geofence_m||60,color:'#3ba0ff',weight:1,fillColor:'#3ba0ff',fillOpacity:.08}).addTo(lmap);
+    if(!homeMarker)homeMarker=L.circleMarker(home,{radius:4,color:'#3ba0ff',fillColor:'#3ba0ff',fillOpacity:1,weight:1}).addTo(lmap).bindTooltip('parked / home');
+  }
+  const far=home&&(_hav(home[0],home[1],s.lat,s.lon)>(s.geofence_m||60));
+  const color=far?'#ff4d4d':'#33d17a';
+  if(carMarker){carMarker.setLatLng(pos);carMarker.setStyle({color,fillColor:color});}
+  else carMarker=L.circleMarker(pos,{radius:8,color,fillColor:color,fillOpacity:.9,weight:2}).addTo(lmap).bindTooltip('🚗 vehicle');
+  if(!mapCentered){lmap.setView(pos,15);mapCentered=true;}
+}
+
+/* ---- law-enforcement recovery report ---- */
+let leText='';
+async function genLeReport(){
+  const rep=$('leReport'); rep.style.display='block'; rep.textContent='Locating vehicle…';
+  try{
+    const d=await (await fetch('/api/le-report')).json();
+    const v=d.vehicle||{}, f=d.fix;
+    const veh=[v.year,v.color,v.make,v.model].filter(Boolean).join(' ');
+    let t='STOLEN VEHICLE — LOCATION REPORT\nGenerated: '+new Date().toLocaleString()+'\n\n';
+    t+='VEHICLE: '+veh+'\n';
+    if(v.plate) t+='Plate: '+v.plate+(v.plate_state?' ('+v.plate_state+')':'')+'\n';
+    if(v.vin) t+='VIN: '+v.vin+'\n';
+    t+='\n';
+    if(f){
+      const age=f.age_secs<90?(f.age_secs+'s ago'):(Math.round(f.age_secs/60)+' min ago');
+      t+='LAST KNOWN LOCATION ('+age+'):\n';
+      if(f.address) t+=f.address+'\n';
+      t+='Coordinates: '+f.lat.toFixed(6)+', '+f.lon.toFixed(6)+'\n';
+      t+='Google Maps: '+f.google_maps+'\n';
+      let mv=[]; if(f.speed_mph!=null)mv.push('Speed: '+f.speed_mph+' mph');
+      if(f.heading)mv.push('Heading: '+f.heading+' ('+Math.round(f.heading_deg)+'°)');
+      if(mv.length)t+=mv.join(' · ')+'\n';
+      $('leMaps').href=f.google_maps; $('leMaps').style.display='inline-block';
+    }else{
+      t+='LAST KNOWN LOCATION: no GPS fix yet.\n(Live tracking of a stolen car needs the in-car GPS device — ESP32.)\n';
+      $('leMaps').style.display='none';
+    }
+    t+='\nSTATUS: '+(d.armed?'ARMED':'disarmed')+(d.immobilized?' · IMMOBILIZED (restart blocked)':'')+(d.online?'':' · device OFFLINE');
+    if(d.trail&&d.trail.length>1){
+      t+='\n\nRECOVERY TRAIL (most recent first):\n'+d.trail.slice(-8).reverse()
+        .map(p=>'  '+new Date(p.ts*1000).toLocaleTimeString()+'  '+p.lat.toFixed(5)+', '+p.lon.toFixed(5)+(p.speed_mph!=null?'  '+p.speed_mph+' mph':'')).join('\n');
+    }
+    leText=t; rep.textContent=t; $('leCopy').style.display='inline-block';
+  }catch(e){ rep.textContent='Could not build report: '+(e.message||e); }
+}
+function copyLeReport(){
+  if(!leText)return;
+  navigator.clipboard.writeText(leText).then(()=>{const b=$('leCopy'),o=b.textContent;b.textContent='✓ Copied';setTimeout(()=>b.textContent=o,1500);},()=>prompt('Copy this report:',leText));
 }
 
 async function runDemo(s){ $('demoNote').textContent='running '+s+' scenario…'; await fetch('/api/demo?scenario='+s,{method:'POST'}); setTimeout(()=>$('demoNote').textContent='',12000); }
@@ -205,6 +278,7 @@ function connect(){
   ws.onmessage=e=>render(JSON.parse(e.data));
   ws.onclose=()=>{ $('dot').className='dot'; $('conntxt').textContent='reconnecting…'; setTimeout(connect,2000); };
 }
+initMap();
 fetch('/api/state').then(r=>r.json()).then(render).catch(()=>{});
 connect();
 </script>

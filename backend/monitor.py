@@ -33,6 +33,24 @@ def _haversine_m(a_lat, a_lon, b_lat, b_lon) -> float:
     return 2 * R * math.asin(min(1.0, math.sqrt(h)))
 
 
+def _bearing(a_lat, a_lon, b_lat, b_lon):
+    """Compass heading (0–360°, N=0) from point A to point B — 'direction of travel' for a recovery report."""
+    if None in (a_lat, a_lon, b_lat, b_lon):
+        return None
+    p1, p2 = math.radians(a_lat), math.radians(b_lat)
+    dl = math.radians(b_lon - a_lon)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def compass(bearing):
+    """Bearing → 8-point compass label (N, NE, …) for a human-readable report."""
+    if bearing is None:
+        return None
+    return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int((bearing + 22.5) % 360 // 45)]
+
+
 class Monitor:
     def __init__(self, offline_after: float = 25.0, armed: bool = True,
                  geofence_m: float = 60.0, overheat_c: float = 112.0):
@@ -50,11 +68,12 @@ class Monitor:
             "vehicle_id": "MY-CAR", "ignition": "unknown", "rpm": 0, "coolant_temp_c": None,
             "lat": None, "lon": None, "speed_mph": 0, "health": "unknown",
             "ts": 0.0, "online": False, "armed": armed, "running_secs": 0,
-            "geofence_m": geofence_m,
+            "geofence_m": geofence_m, "heading": None,
             "immobilized": False, "engine_killed": False, "kill_pending": False,
         }
         self.history: deque = deque(maxlen=300)
         self.alerts: deque = deque(maxlen=100)
+        self.track: deque = deque(maxlen=400)     # GPS breadcrumbs → recovery trail for a stolen vehicle
 
     # ── control ───────────────────────────────────────────────────────────────
     def set_armed(self, armed: bool) -> None:
@@ -195,9 +214,19 @@ class Monitor:
         if self._immobilized and ign == OFF and self._kill_pending:
             self._kill_pending, self._killed = False, True
 
+        # ── recovery trail: log GPS breadcrumbs (with direction of travel) for stolen-vehicle tracking ──
+        heading = self.state.get("heading")
+        if lat is not None and lon is not None:
+            last = self.track[-1] if self.track else None
+            moved = _haversine_m(last["lat"], last["lon"], lat, lon) if last else 1e9
+            if last is None or moved >= 8:                       # ~8 m → skip GPS jitter while parked
+                if last is not None and moved >= 2:
+                    heading = _bearing(last["lat"], last["lon"], lat, lon)
+                self.track.append({"ts": now, "lat": lat, "lon": lon, "speed_mph": speed, "heading": heading})
+
         self.state.update({
             "vehicle_id": vid, "ignition": ign, "rpm": rpm, "coolant_temp_c": temp,
-            "lat": lat, "lon": lon, "speed_mph": speed, "health": health,
+            "lat": lat, "lon": lon, "speed_mph": speed, "health": health, "heading": heading,
             "ts": now, "online": True, "armed": self._armed,
             "running_secs": int(now - self._started_ts) if (ign == RUNNING and self._started_ts) else 0,
             "immobilized": self._immobilized, "engine_killed": self._killed, "kill_pending": self._kill_pending,
@@ -223,4 +252,5 @@ class Monitor:
         return a
 
     def snapshot(self) -> dict:
-        return {"state": dict(self.state), "history": list(self.history)[:60], "alerts": list(self.alerts)[:30]}
+        return {"state": dict(self.state), "history": list(self.history)[:60],
+                "alerts": list(self.alerts)[:30], "track": list(self.track)[-200:]}

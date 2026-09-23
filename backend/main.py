@@ -14,12 +14,14 @@ import asyncio
 import json
 import os
 import random
+import time
+import urllib.request
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from .monitor import Monitor
+from .monitor import Monitor, compass
 from . import notify
 
 _HERE = os.path.dirname(__file__)
@@ -69,6 +71,41 @@ async def ingest(req: Request):
 @app.get("/api/state")
 async def state():
     return mon.snapshot()
+
+
+def _reverse_geocode(lat: float, lon: float) -> str | None:
+    """Coords → street address (OpenStreetMap Nominatim, free, no key). Best-effort; returns None on failure."""
+    try:
+        url = (f"https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=0"
+               f"&lat={lat}&lon={lon}")
+        req = urllib.request.Request(url, headers={"User-Agent": "ACE-Remote/1.0 (vehicle recovery)"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return json.loads(r.read().decode()).get("display_name")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/api/le-report")
+async def le_report():
+    """🚓 Stolen-vehicle report for law enforcement: current location + street address, time & data-age,
+    direction of travel, the full vehicle description, a Google Maps link, and the recent recovery trail."""
+    s = mon.state
+    v = notify.load_config().get("vehicle", {})
+    vehicle = {"year": v.get("year", "2017"), "make": v.get("make", "Audi"),
+               "model": v.get("model", "Q7 quattro Premium Plus 3.0T"),
+               "color": v.get("color", ""), "plate": v.get("plate", ""),
+               "plate_state": v.get("plate_state", ""), "vin": v.get("vin", "WA1LAAF70HD024141")}
+    lat, lon, fix = s.get("lat"), s.get("lon"), None
+    if lat is not None and lon is not None:
+        addr = await asyncio.to_thread(_reverse_geocode, lat, lon)
+        fix = {"lat": lat, "lon": lon, "ts": s.get("ts"),
+               "age_secs": int(time.time() - (s.get("ts") or time.time())),
+               "speed_mph": s.get("speed_mph"), "heading_deg": s.get("heading"),
+               "heading": compass(s.get("heading")), "address": addr,
+               "google_maps": f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"}
+    return {"vehicle": vehicle, "fix": fix, "armed": mon.armed,
+            "immobilized": s.get("immobilized"), "online": s.get("online"),
+            "trail": list(mon.track)[-100:], "generated": time.time()}
 
 
 @app.post("/api/arm")
