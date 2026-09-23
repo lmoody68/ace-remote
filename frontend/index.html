@@ -37,6 +37,14 @@
   .loc{font-size:12px;color:var(--dim);margin-top:8px;font-variant-numeric:tabular-nums}
   /* alerts */
   .testbtn{background:#26303f;color:var(--accent);border:1px solid var(--line);border-radius:9px;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:600}
+  /* remote engine control */
+  .killbtn,.immobtn,.rebtn{border:0;border-radius:9px;padding:10px 14px;cursor:pointer;font-size:12.5px;font-weight:800}
+  .killbtn{background:var(--crit);color:#fff}
+  .immobtn{background:#3a2f12;color:var(--warn);border:1px solid var(--warn)}
+  .rebtn{background:#12261a;color:var(--ok);border:1px solid var(--ok)}
+  .killstat{font-size:12.5px;border-radius:9px;padding:9px 11px;background:var(--panel2);border:1px solid var(--line);color:var(--dim)}
+  .killstat.active{border-color:var(--crit);background:rgba(255,77,77,.09);color:#ffd7d7;font-weight:600}
+  .engine.killed{background:rgba(255,77,77,.16);border-color:var(--crit);box-shadow:0 0 22px rgba(255,77,77,.32)}
   .alert{border-radius:9px;padding:10px 12px;margin-bottom:8px;font-size:13px;border-left:3px solid var(--mute);background:var(--panel2)}
   .alert.critical{border-left-color:var(--crit);background:rgba(255,77,77,.08);color:#ffd7d7}
   .alert.warn{border-left-color:var(--warn);background:rgba(245,166,35,.07)}
@@ -87,6 +95,16 @@
 
     <div>
       <div class="card" style="margin-bottom:14px">
+        <h2 style="margin:0 0 10px">🛑 Remote engine control</h2>
+        <div class="killstat" id="killStatus">Engine control ready — kill or immobilize from your phone.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="killbtn" onclick="killEngine()">🛑 Kill engine</button>
+          <button class="immobtn" onclick="immobilize()">🔒 Immobilize</button>
+          <button class="rebtn" onclick="reEnable()">✅ Re-enable</button>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:8px">Safety: A.C.E. never cuts a <b>moving</b> engine — if the car is in motion it blocks restart and cuts the instant it stops.</div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <h2 style="margin:0">Alerts → your phone</h2>
           <button class="testbtn" onclick="testAlert()">Test phone alert</button>
@@ -110,9 +128,10 @@ function mmss(s){s=s||0;return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')
 function render(d){
   const s=d.state||{};
   const on=s.ignition==='on';
-  $('engine').className='engine '+(on?'on':'off');
-  $('ignBig').textContent=on?'ENGINE ON':(s.ignition==='off'?'ENGINE OFF':'—');
-  $('ignBig').style.color=on?'var(--ok)':(s.ignition==='off'?'var(--crit)':'var(--ink)');
+  const killed=!!s.engine_killed;
+  $('engine').className='engine '+(killed?'killed':(on?'on':'off'));
+  $('ignBig').textContent=killed?'ENGINE CUT':(on?'ENGINE ON':(s.ignition==='off'?'ENGINE OFF':'—'));
+  $('ignBig').style.color=(killed||s.ignition==='off')?'var(--crit)':(on?'var(--ok)':'var(--ink)');
   $('ignSub').textContent=s.online?(on?('running · '+(s.health||'ok')):'parked'):'device offline';
   $('rpm').textContent=s.rpm||0;
   $('temp').textContent=(s.coolant_temp_c==null?'–':Math.round(s.coolant_temp_c));
@@ -132,6 +151,15 @@ function render(d){
   // history
   const h=d.history||[];
   $('history').innerHTML = h.length? h.slice(0,12).map(e=>`<div class="ev"><span class="t">${fmtT(e.ts)}</span><span>${e.msg}</span></div>`).join('') : '<div class="muted">—</div>';
+  // remote engine control status
+  const im=s.immobilized, kl=s.engine_killed, kp=s.kill_pending, ks=$('killStatus');
+  if(ks){
+    ks.textContent = kl? '🛑 ENGINE CUT — vehicle immobilized, cannot restart. Tap Re-enable to restore.'
+      : kp? '⏳ Engine-cut QUEUED — vehicle moving; it cuts the moment it stops (restart stays blocked).'
+      : im? '🔒 IMMOBILIZED — restart blocked.'
+      : 'Engine control ready — kill or immobilize from your phone.';
+    ks.className='killstat'+((kl||kp||im)?' active':'');
+  }
 }
 
 function drawMap(s){
@@ -157,6 +185,19 @@ async function runDemo(s){ $('demoNote').textContent='running '+s+' scenario…'
 async function toggleArm(){ await fetch('/api/arm',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({armed:!armed})}); }
 async function testAlert(){ const r=await fetch('/api/test-alert',{method:'POST'}); const j=await r.json();
   alert('Test alert dispatched.\n\n'+JSON.stringify(j.sent,null,1)); }
+async function killEngine(){
+  if(!confirm('KILL ENGINE?\n\nCuts the engine now — or, if the car is MOVING, it blocks restart and cuts the instant it stops (A.C.E. never kills a moving engine). Continue?')) return;
+  const r=await fetch('/api/kill',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})});
+  const j=await r.json(); if(j&&j.msg)$('killStatus').textContent=j.msg;
+}
+async function immobilize(){
+  if(!confirm('IMMOBILIZE the vehicle?\n\nBlocks restart (safe anytime) and cuts the engine if it is idling/stopped. Continue?')) return;
+  const r=await fetch('/api/immobilize',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})});
+  const j=await r.json(); if(j&&j.msg)$('killStatus').textContent=j.msg;
+}
+async function reEnable(){
+  const r=await fetch('/api/release',{method:'POST'}); const j=await r.json(); if(j&&j.msg)$('killStatus').textContent=j.msg;
+}
 
 function connect(){
   const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');

@@ -19,6 +19,7 @@ import time
 from collections import deque
 
 RUNNING, OFF = "on", "off"
+SAFE_KILL_MPH = 3          # SAFETY: never remote-cut a running engine above this speed (queue it instead)
 
 
 def _haversine_m(a_lat, a_lon, b_lat, b_lon) -> float:
@@ -42,11 +43,15 @@ class Monitor:
         self._started_ts: float | None = None
         self._parked: tuple[float, float] | None = None
         self._last = {"theft": 0.0, "geo": 0.0, "overheat": 0.0}
+        self._immobilized = False     # restart blocked (owner remote lock)
+        self._kill_pending = False    # owner requested a cut while the car was MOVING → cut when it stops
+        self._killed = False          # engine currently cut by the remote kill/immobilizer
         self.state = {
             "vehicle_id": "MY-CAR", "ignition": "unknown", "rpm": 0, "coolant_temp_c": None,
             "lat": None, "lon": None, "speed_mph": 0, "health": "unknown",
             "ts": 0.0, "online": False, "armed": armed, "running_secs": 0,
             "geofence_m": geofence_m,
+            "immobilized": False, "engine_killed": False, "kill_pending": False,
         }
         self.history: deque = deque(maxlen=300)
         self.alerts: deque = deque(maxlen=100)
@@ -63,6 +68,64 @@ class Monitor:
     @property
     def armed(self) -> bool:
         return self._armed
+
+    # ── remote engine control (anti-theft kill switch) ─────────────────────────
+    @property
+    def immobilized(self) -> bool:
+        return self._immobilized
+
+    def _apply_kill(self, reason: str = "") -> None:
+        """Cut the engine NOW (only ever called when the vehicle is stationary/off)."""
+        self._killed = True
+        self._kill_pending = False
+        self._started_ts = None
+        self.state.update({"ignition": OFF, "rpm": 0, "running_secs": 0,
+                           "engine_killed": True, "kill_pending": False})
+        self._log("engine_cut", f"🛑 engine cut ({reason})")
+
+    def request_kill(self) -> dict:
+        """Owner remote engine-CUT. SAFETY: never cuts a MOVING engine (loss of steering/brakes) — if the
+        car is in motion, immobilize it and QUEUE the cut for the moment it stops."""
+        self._immobilized = True
+        self.state["immobilized"] = True
+        running = self.state["ignition"] == RUNNING
+        speed = int(self.state.get("speed_mph") or 0)
+        if running and speed > SAFE_KILL_MPH:
+            self._kill_pending = True
+            self.state["kill_pending"] = True
+            msg = (f"🛑 Engine-cut ARMED but DEFERRED — vehicle is moving ({speed} mph). For safety A.C.E. "
+                   f"will NOT cut a moving engine; it stays immobilized (can't restart) and cuts the instant "
+                   f"the car stops.")
+            self._alert("critical", msg)
+            return {"status": "queued", "immobilized": True, "engine_killed": False, "msg": msg}
+        self._apply_kill("owner remote engine-cut")
+        msg = "🛑 ENGINE CUT — remote kill executed. Vehicle is immobilized and cannot restart until you re-enable it."
+        self._alert("critical", msg)
+        return {"status": "killed", "immobilized": True, "engine_killed": True, "msg": msg}
+
+    def immobilize(self) -> dict:
+        """Block RESTART (safe anytime). Cuts a stationary/idling engine; leaves a moving one running."""
+        self._immobilized = True
+        self.state["immobilized"] = True
+        running = self.state["ignition"] == RUNNING
+        speed = int(self.state.get("speed_mph") or 0)
+        if running and speed <= SAFE_KILL_MPH:
+            self._apply_kill("immobilize (stationary)")
+            msg = "🔒 IMMOBILIZED — engine cut (it was idling) and restart is blocked."
+        else:
+            msg = ("🔒 IMMOBILIZED — restart BLOCKED. A thief can't start it; if it's moving it keeps running "
+                   "until it stops, then stays blocked.")
+        self._alert("critical", msg)
+        return {"status": "immobilized", "immobilized": True,
+                "engine_killed": self._killed, "msg": msg}
+
+    def release(self) -> dict:
+        """Owner re-enables the vehicle — clears the immobilizer and any queued/active cut."""
+        self._immobilized = self._kill_pending = self._killed = False
+        self.state.update({"immobilized": False, "engine_killed": False, "kill_pending": False})
+        msg = "✅ Vehicle RE-ENABLED — immobilizer cleared; the engine may start normally."
+        self._alert("warn", msg)
+        return {"status": "released", "immobilized": False, "engine_killed": False, "msg": msg}
 
     # ── ingest one telemetry reading (real OBD/GPS or simulator) ───────────────
     def ingest(self, r: dict) -> list[dict]:
@@ -82,13 +145,16 @@ class Monitor:
 
         # ── ignition transitions ──
         if prev in (None, "unknown", OFF) and ign == RUNNING:
-            self._started_ts = now
-            self._log("started", f"🚗 {vid} engine STARTED")
-            if self._armed and now - self._last["theft"] > 15:
-                self._last["theft"] = now
-                fresh.append(self._alert("critical",
-                    f"🚨 THEFT ALERT: {vid} just STARTED while ARMED and you didn't disarm it "
-                    f"(RPM {rpm}). Someone may be stealing your car."))
+            if self._immobilized:
+                self._log("restart_blocked", f"🛑 {vid} start attempt BLOCKED — immobilizer active")
+            else:
+                self._started_ts = now
+                self._log("started", f"🚗 {vid} engine STARTED")
+                if self._armed and now - self._last["theft"] > 15:
+                    self._last["theft"] = now
+                    fresh.append(self._alert("critical",
+                        f"🚨 THEFT ALERT: {vid} just STARTED while ARMED and you didn't disarm it "
+                        f"(RPM {rpm}). Someone may be stealing your car."))
         elif prev == RUNNING and ign == OFF:
             dur = int(now - (self._started_ts or now))
             self._log("stopped", f"🅿 {vid} engine OFF (ran {dur}s)")
@@ -115,11 +181,26 @@ class Monitor:
         if r.get("dtc"):
             health = "fault"
 
+        # ── immobilizer / remote engine-cut enforcement (SAFETY: never cut a MOVING engine) ──
+        if self._immobilized and ign == RUNNING:
+            if speed <= SAFE_KILL_MPH:               # stationary + running under the lock → cut it
+                ign, rpm = OFF, 0
+                self._started_ts = None
+                if not self._killed:
+                    self._killed = True
+                    self._log("engine_cut", "🛑 engine cut — immobilizer active, vehicle stationary")
+            elif not self._kill_pending:             # moving → defer the cut, keep restart blocked
+                self._kill_pending = True
+                self._log("kill_deferred", f"🛑 engine-cut deferred — vehicle moving {speed} mph; cuts when stopped")
+        if self._immobilized and ign == OFF and self._kill_pending:
+            self._kill_pending, self._killed = False, True
+
         self.state.update({
             "vehicle_id": vid, "ignition": ign, "rpm": rpm, "coolant_temp_c": temp,
             "lat": lat, "lon": lon, "speed_mph": speed, "health": health,
             "ts": now, "online": True, "armed": self._armed,
             "running_secs": int(now - self._started_ts) if (ign == RUNNING and self._started_ts) else 0,
+            "immobilized": self._immobilized, "engine_killed": self._killed, "kill_pending": self._kill_pending,
         })
         return fresh
 

@@ -74,6 +74,68 @@ async def arm(req: Request):
     return {"armed": mon.armed}
 
 
+def _publish_command(action: str) -> None:
+    """Best-effort: tell the REAL in-car device to act (kill/immobilize/release) over its MQTT command
+    topic. No-op for the software-only demo (the Monitor already enforces the state)."""
+    try:
+        cfg = notify.load_config().get("mqtt", {})
+        if not cfg.get("enabled"):
+            return
+        import paho.mqtt.publish as publish
+        vid = mon.state.get("vehicle_id", "MY-CAR")
+        publish.single(cfg.get("command_topic", f"ace-remote/{vid}/command"),
+                       json.dumps({"action": action}),
+                       hostname=cfg.get("host", "test.mosquitto.org"), port=int(cfg.get("port", 1883)),
+                       auth=({"username": cfg["username"], "password": cfg.get("password", "")}
+                             if cfg.get("username") else None),
+                       tls={} if cfg.get("tls") else None)
+    except Exception as e:  # noqa: BLE001
+        print("[cmd] publish failed:", e)
+
+
+async def _safe_body(req: Request) -> dict:
+    try:
+        return await req.json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+@app.post("/api/kill")
+async def kill(req: Request):
+    """🛑 Remote engine-cut (anti-theft). SAFETY: never cuts a MOVING engine — if the car is in motion it
+    immobilizes it (blocks restart) and QUEUES the cut for the instant it stops. Needs {"confirm": true}."""
+    if not (await _safe_body(req)).get("confirm"):
+        return JSONResponse({"ok": False, "error": 'confirmation required — send {"confirm": true}'},
+                            status_code=400)
+    res = mon.request_kill()
+    await asyncio.to_thread(_publish_command, "kill")
+    await _broadcast(mon.snapshot())
+    await asyncio.to_thread(notify.send_alert, {"ts": None, "level": "critical", "msg": res["msg"]}, None, True)
+    return {"ok": True, **res}
+
+
+@app.post("/api/immobilize")
+async def immobilize(req: Request):
+    """🔒 Block restart (safe anytime); cuts a stationary/idling engine. Needs {"confirm": true}."""
+    if not (await _safe_body(req)).get("confirm"):
+        return JSONResponse({"ok": False, "error": 'confirmation required — send {"confirm": true}'},
+                            status_code=400)
+    res = mon.immobilize()
+    await asyncio.to_thread(_publish_command, "immobilize")
+    await _broadcast(mon.snapshot())
+    await asyncio.to_thread(notify.send_alert, {"ts": None, "level": "critical", "msg": res["msg"]}, None, True)
+    return {"ok": True, **res}
+
+
+@app.post("/api/release")
+async def release():
+    """✅ Owner re-enables the vehicle (clears immobilizer + any queued/active cut)."""
+    res = mon.release()
+    await asyncio.to_thread(_publish_command, "release")
+    await _broadcast(mon.snapshot())
+    return {"ok": True, **res}
+
+
 @app.post("/api/test-alert")
 async def test_alert():
     """Fire a test theft alert through the real notifier so you can confirm it reaches your phone."""
