@@ -14,7 +14,9 @@ Pure logic, no I/O — the server layer turns a returned `alerts` payload into M
 """
 from __future__ import annotations
 
+import json
 import math
+import os
 import time
 from collections import deque
 
@@ -53,7 +55,8 @@ def compass(bearing):
 
 class Monitor:
     def __init__(self, offline_after: float = 25.0, armed: bool = True,
-                 geofence_m: float = 60.0, overheat_c: float = 112.0):
+                 geofence_m: float = 60.0, overheat_c: float = 112.0,
+                 persist_path: str | None = None):
         self.offline_after = offline_after
         self.geofence_m = geofence_m
         self.overheat_c = overheat_c
@@ -74,6 +77,9 @@ class Monitor:
         self.history: deque = deque(maxlen=300)
         self.alerts: deque = deque(maxlen=100)
         self.track: deque = deque(maxlen=400)     # GPS breadcrumbs → recovery trail for a stolen vehicle
+        self._persist_path = persist_path         # if set, history/alerts/track survive restarts
+        if persist_path:
+            self._restore()
 
     # ── control ───────────────────────────────────────────────────────────────
     def set_armed(self, armed: bool) -> None:
@@ -254,3 +260,39 @@ class Monitor:
     def snapshot(self) -> dict:
         return {"state": dict(self.state), "history": list(self.history)[:60],
                 "alerts": list(self.alerts)[:30], "track": list(self.track)[-200:]}
+
+    # ── persistence: keep the event record across restarts ─────────────────────
+    def persist(self) -> None:
+        """Atomically save history/alerts/track (+ parked home & last fix) to disk. Cheap, best-effort."""
+        if not self._persist_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._persist_path), exist_ok=True)
+            tmp = self._persist_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"history": list(self.history), "alerts": list(self.alerts),
+                           "track": list(self.track), "parked": self._parked,
+                           "lat": self.state.get("lat"), "lon": self.state.get("lon"),
+                           "heading": self.state.get("heading"),
+                           "vehicle_id": self.state.get("vehicle_id")}, f)
+            os.replace(tmp, self._persist_path)                # atomic: no half-written file on crash
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _restore(self) -> None:
+        """Reload the saved record on startup (best-effort; a missing/corrupt file just starts fresh)."""
+        try:
+            with open(self._persist_path, encoding="utf-8") as f:
+                d = json.load(f)
+            self.history = deque(d.get("history", []), maxlen=300)
+            self.alerts = deque(d.get("alerts", []), maxlen=100)
+            self.track = deque(d.get("track", []), maxlen=400)
+            p = d.get("parked")
+            self._parked = tuple(p) if p else None
+            for k in ("lat", "lon", "heading", "vehicle_id"):
+                if d.get(k) is not None:
+                    self.state[k] = d[k]
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        except Exception:  # noqa: BLE001
+            pass

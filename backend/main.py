@@ -32,7 +32,8 @@ app = FastAPI(title="A.C.E. Remote")
 app.add_middleware(CORSMiddleware,
                    allow_origins=["https://ace-auto.us", "https://www.ace-auto.us"],
                    allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
-mon = Monitor()
+# Persist the event record (history/alerts/recovery trail) to disk so a restart never wipes it.
+mon = Monitor(persist_path=os.path.join(_HERE, "..", "data", "history.json"))
 _clients: set[WebSocket] = set()
 _loop: asyncio.AbstractEventLoop | None = None
 
@@ -55,7 +56,9 @@ async def _process(reading: dict) -> None:
     await _broadcast(mon.snapshot())
     for a in fresh:
         res = await asyncio.to_thread(notify.send_alert, a)
-        print(f"[alert] {a['level']}: {a['msg']}  -> {res}")
+        print(f"[alert] {a['level']}: {a['msg']}  -> {res}", flush=True)
+    if fresh:
+        await asyncio.to_thread(mon.persist)     # save important events immediately
 
 
 # ── HTTP ingest (simulator / demo) ───────────────────────────────────────────
@@ -270,6 +273,7 @@ async def _offline_watch():
         for a in mon.check_offline():
             await _broadcast(mon.snapshot())
             await asyncio.to_thread(notify.send_alert, a)
+        await asyncio.to_thread(mon.persist)     # periodic snapshot to disk (≤5s of loss worst-case)
 
 
 def _start_mqtt():
